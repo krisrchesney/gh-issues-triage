@@ -1,13 +1,13 @@
 name: collect
 
-# Manual by default so a fresh clone does not burn Actions minutes by accident.
-# To collect on a schedule, uncomment the cron lines (public repos run Actions free).
-# Scheduled runs are best-effort and can start late; hourly is plenty for issue data.
+# Runs on a schedule and can also be started by hand from the Actions tab.
+# Scheduled runs are best-effort and can start late. Every 6 hours is plenty: the model predicts
+# 14 day outcomes, and each run pushes a data commit.
 # GitHub may pause scheduled workflows after about 60 days without repository activity.
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: "17 * * * *"
+  schedule:
+    - cron: "17 */6 * * *"
 
 # Needed so the job can push the data branch with the built-in token.
 permissions:
