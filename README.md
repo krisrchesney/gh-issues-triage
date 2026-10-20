@@ -65,6 +65,7 @@ The first backfill is capped at `max_pages_per_repo` pages per repo per run; re-
 ## Decisions and tradeoffs
 
 - **Label = closed within 14 days, any reason.** Cheap to compute from the list endpoint (time-to-first-response would need one extra request per issue, which the 1,000 requests/hour Actions budget cannot afford). The cost: "closed" mixes completed, duplicate and not-planned.
+- **Issues created before `coverage_start` are not stored.** The builder would drop them anyway, so keeping them only grows the data branch. A small `gh_state` progress marker keeps resumption correct when whole pages are skipped.
 - **Pull requests are fetched and discarded.** The issues endpoint returns both and cannot filter them server-side, so PR-heavy repos spend pages on rows that are thrown away.
 - **Counts instead of text.** Privacy and storage win; a language model on the text is the obvious next step and is not included.
 - **The baseline must be beaten.** Logistic regression stays champion unless a challenger gains at least 0.01 ROC AUC.
