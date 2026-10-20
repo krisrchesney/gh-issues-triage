@@ -300,3 +300,42 @@ def test_check_repos_reports_activity(gh_cfg):
         }
     ]
     assert len(server.requests) == 2
+
+
+def _run_twice_with_server(gh_cfg, server, times):
+    collect.COLLECTORS["gh_issues"] = lambda c: GitHubIssuesCollector(
+        c, transport=httpx.MockTransport(server.handler), sleep=lambda s: None
+    )
+    try:
+        return [collect.run_collector("gh_issues", gh_cfg) for _ in range(times)]
+    finally:
+        collect.COLLECTORS["gh_issues"] = GitHubIssuesCollector
+
+
+def test_issues_created_before_coverage_start_are_not_stored(gh_cfg):
+    issues = [
+        gh_issue(1, "2026-07-10T00:00:00Z", created="2010-01-01T00:00:00Z"),  # old, still active
+        gh_issue(2, "2026-07-11T00:00:00Z", created="2026-07-05T00:00:00Z"),
+        gh_issue(3, "2026-07-12T00:00:00Z", created="2026-06-30T23:59:59Z"),  # one second too early
+    ]
+    server = FakeGitHub({"org/alpha": issues})
+    assert _run_twice_with_server(gh_cfg, server, 1) == [(1, 0)]
+    assert list(load_lake(gh_cfg["lake"]["root"], "gh_issues")["number"]) == [2]
+
+
+def test_progress_survives_pages_that_contain_only_old_issues(gh_cfg):
+    """Regression guard: with skipped rows the cursor cannot come from stored issues alone."""
+    gh_cfg["github"]["max_pages_per_repo"] = 1
+    old = [gh_issue(n, f"2026-07-{n + 1:02d}T00:00:00Z", created="2015-01-01T00:00:00Z") for n in range(1, 7)]
+    new = [gh_issue(7, "2026-07-20T00:00:00Z", created="2026-07-19T00:00:00Z")]
+    server = FakeGitHub({"org/alpha": old + new})
+    _run_twice_with_server(gh_cfg, server, 6)
+    assert list(load_lake(gh_cfg["lake"]["root"], "gh_issues")["number"]) == [7]
+
+
+def test_progress_marker_is_written_after_a_run_and_not_for_an_empty_one(gh_cfg):
+    server = FakeGitHub({"org/alpha": [gh_issue(1, "2026-07-10T12:00:00Z")]})
+    _run_twice_with_server(gh_cfg, server, 1)
+    state = load_lake(gh_cfg["lake"]["root"], "gh_state")
+    assert list(state["repo"]) == ["org/alpha"]
+    assert pd.Timestamp(state["updated_at"].max()) == pd.Timestamp("2026-07-10 12:00:00")

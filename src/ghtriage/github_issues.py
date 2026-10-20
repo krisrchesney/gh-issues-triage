@@ -11,8 +11,14 @@ What it does not store: issue bodies. Text is reduced to counts (length, code bl
 ingest. That keeps the lake small and avoids copying other people's text around. Author ids are salted
 and hashed, so the lake holds a stable pseudonym rather than a GitHub account.
 
-Resumable: the cursor per repository is the newest `updated_at` already in the lake, so there is no
-separate state file. Issues are fetched oldest-update-first, so a run cut short by the rate limit or
+Issues created before `coverage_start` are not stored: the dataset builder would drop them anyway
+(they are a survivor-biased sample), so keeping them only grows the repository. Because skipped issues
+leave no rows behind, progress is also recorded in a small lake source, `gh_state` (newest `updated_at`
+processed per repo), written after the rows are stored. Without it a page holding only old issues would
+leave the cursor where it was and a capped run would fetch the same pages forever.
+
+Resumable: the cursor per repository is the newer of the newest stored `updated_at` and the `gh_state`
+progress marker. Issues are fetched oldest-update-first, so a run cut short by the rate limit or
 `max_pages_per_repo` resumes where it stopped.
 
 Known limitation: list endpoints are paginated by position. If an already-passed issue is updated
@@ -38,7 +44,7 @@ import httpx
 import pandas as pd
 
 from ghtriage.config import load_config
-from ghtriage.lake import lake_cursors
+from ghtriage.lake import lake_cursors, upsert_partitioned
 
 API_ROOT = "https://api.github.com"
 MAX_ATTEMPTS = 3
@@ -163,6 +169,8 @@ class GitHubIssuesCollector:
         self._sleep = sleep
         self.pages_fetched = 0
         self.stopped_early = False
+        self.skipped_before_coverage = 0
+        self._progress: dict[str, pd.Timestamp] = {}
 
     # ---- HTTP -------------------------------------------------------------------------------
 
@@ -243,7 +251,14 @@ class GitHubIssuesCollector:
             pages += 1
             self.pages_fetched += 1
             for item in resp.json():
+                updated = pd.Timestamp(item["updated_at"]).tz_convert("UTC").tz_localize(None)
+                if repo not in self._progress or updated > self._progress[repo]:
+                    self._progress[repo] = updated
                 if "pull_request" in item:
+                    continue
+                created = pd.Timestamp(item["created_at"]).tz_convert("UTC").tz_localize(None)
+                if created < self.coverage_start:
+                    self.skipped_before_coverage += 1
                     continue
                 out.append(normalise_issue(item, repo, self.salt))
             remaining = resp.headers.get("x-ratelimit-remaining")
@@ -252,9 +267,27 @@ class GitHubIssuesCollector:
                 raise RateLimited(f"only {remaining} requests left in this window")
             url = self._next_url(resp)
 
+    def commit(self) -> None:
+        """Runs after the rows are stored: record how far this run got, per repository."""
+        if not self._progress:
+            return
+        state = pd.DataFrame(
+            [{"repo": r, "updated_at": ts.as_unit("ns")} for r, ts in sorted(self._progress.items())]
+        )
+        upsert_partitioned(
+            self.cfg["lake"]["root"],
+            "gh_state",
+            state,
+            key_cols=["repo", "updated_at"],
+            partition_col="updated_at",
+        )
+
     def fetch(self) -> pd.DataFrame:
         root = self.cfg["lake"]["root"]
         cursors = lake_cursors(root, self.name, "updated_at", "repo")
+        for repo_name, marker in lake_cursors(root, "gh_state", "updated_at", "repo").items():
+            if repo_name not in cursors or marker > cursors[repo_name]:
+                cursors[repo_name] = marker
         rows: list[dict[str, Any]] = []
         with self._client() as client:
             for repo in self.repos:
