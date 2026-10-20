@@ -1,0 +1,41 @@
+name: retrain
+
+# Rebuilds the dataset from the data branch, retrains, and publishes the model, SHAP and drift reports
+# as a downloadable artifact. Manual by default; uncomment the cron line to run weekly.
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "30 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[train,explain,monitor]"
+      - name: Restore history from the data branch
+        run: bash scripts/data_sync.sh pull
+      - name: Build dataset
+        run: python -m ghtriage.cli build
+      - name: Train and promote champion
+        run: python -m ghtriage.cli train
+      - name: Drift check (exit code 2 means "retrain advised", which is information, not a failure)
+        run: python -m ghtriage.cli drift || [ $? -eq 2 ]
+      - name: SHAP importance and Evidently report
+        run: |
+          python -m ghtriage.cli explain
+          python -m ghtriage.cli monitor-report
+      - uses: actions/upload-artifact@v4
+        with:
+          name: model-and-reports
+          path: |
+            models/
+            reports/

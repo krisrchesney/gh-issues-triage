@@ -1,0 +1,87 @@
+project: gh-issues-triage
+
+lake:
+  root: data/raw              # Parquet partitions: <root>/gh_issues/dt=YYYY-MM-DD/part.parquet
+
+github:
+  # Busy, Google-backed or Google-originated repositories. Activity levels are NOT verified:
+  # run `python -m ghtriage.github_issues check-repos` first and drop any that are too quiet.
+  repos:
+    - tensorflow/tensorflow
+    - flutter/flutter
+    - angular/angular
+    - golang/go
+  # Absolute date where history starts. GitHub keeps full history, so the first run backfills
+  # from here instead of waiting for data to accumulate. Do not move it later without re-collecting.
+  coverage_start: "2026-07-01"
+  per_page: 100
+  max_pages_per_repo: 30      # per run; larger backfills resume automatically on the next run
+  overlap_minutes: 60         # re-read a little history each run (upserts make this safe)
+  min_rate_limit_remaining: 50
+  api_version: null           # null = GitHub's default version; set only if you verify a newer one
+  token_env: GITHUB_TOKEN
+  author_salt_env: GH_AUTHOR_SALT
+
+data:
+  db_path: data/warehouse.duckdb
+  table: training_data
+  source: gh_issues
+  builder: "ghtriage.features:build_training_table"
+  timestamp_col: event_ts
+  label_horizon_days: 14      # target: issue closed within this many days of being opened
+  warmup_days: 30             # skip the first days after coverage_start (context features need history)
+  min_rows: 200
+
+model:
+  description: >
+    Predicts, at the moment an issue is opened, whether maintainers will close it within 14 days.
+    Intended use: triage support (surface issues likely to stall) and a monitoring demo, not automation.
+  label_definition: "1 if closed_at - created_at <= 14 days (any close reason), else 0. Issues younger than 14 days are excluded."
+  limitations:
+    - "Closed means closed for any reason, including not planned and duplicates."
+    - "Text is reduced to counts (length, code blocks, links); no language model features yet."
+    - "Context features start empty at coverage_start; the first 30 days are skipped."
+    - "Trained on a handful of large repositories; do not assume it transfers to small projects."
+  target: label
+  # Explicit allowlist (not 'every numeric column') so a new raw column can never leak in silently.
+  features:
+    - title_len
+    - title_words
+    - body_len
+    - body_words
+    - code_blocks
+    - has_stack_trace
+    - n_links
+    - n_images
+    - has_version
+    - n_questions
+    - n_checkboxes
+    - n_headings
+    - is_bot
+    - assoc_maintainer
+    - assoc_first_time
+    - assoc_contributor
+    - created_hour
+    - created_dow
+    - is_weekend
+    - author_prior_issues
+    - repo_arrivals_7d
+    - repo_open_30d
+    - repo_median_ttc_30d_hours
+    - repo_closed_rate_recent
+  candidates: [logistic_baseline, hist_gbm, lightgbm]
+  test_fraction: 0.2          # most recent 20% of rows is held out (time-aware split)
+  random_state: 42
+  registry_dir: models
+  # The challenger must beat the baseline ROC AUC by at least this much to be promoted.
+  min_auc_improvement: 0.01
+
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  experiment: gh-issues-triage
+
+drift:
+  bins: 10
+  psi_warn: 0.10              # common rule of thumb: <0.1 stable, 0.1-0.25 moderate, >0.25 major
+  psi_alert: 0.25
+  auc_drop_alert: 0.05        # retrain if live AUC falls this far below the training test AUC

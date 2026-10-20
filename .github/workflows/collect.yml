@@ -1,0 +1,42 @@
+name: collect
+
+# Manual by default so a fresh clone does not burn Actions minutes by accident.
+# To collect on a schedule, uncomment the cron lines (public repos run Actions free).
+# Scheduled runs are best-effort and can start late; hourly is plenty for issue data.
+# GitHub may pause scheduled workflows after about 60 days without repository activity.
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "17 * * * *"
+
+# Needed so the job can push the data branch with the built-in token.
+permissions:
+  contents: write
+
+# One collector run at a time: they all write to the same data branch.
+concurrency:
+  group: collect-data
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e .
+      - name: Restore history from the data branch
+        run: bash scripts/data_sync.sh pull
+      - name: Collect GitHub issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Set this repository secret ONCE, before the first run, and never change it afterwards:
+          # it salts the author hashes, and changing it would split every author's history in two.
+          GH_AUTHOR_SALT: ${{ secrets.GH_AUTHOR_SALT }}
+        run: python -m ghtriage.cli collect gh_issues
+      - name: Save history to the data branch
+        run: bash scripts/data_sync.sh push
