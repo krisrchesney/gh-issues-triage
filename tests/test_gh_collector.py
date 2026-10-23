@@ -77,9 +77,13 @@ class FakeGitHub:
         since = params.get("since", "0000")
         per_page = int(params.get("per_page", 30))
         page = int(params.get("page", 1))
-        items = sorted(
-            (i for i in self.issues[repo] if i["updated_at"] >= since), key=lambda i: i["updated_at"]
-        )
+
+        # "_sort" lets a test give an item a list position that disagrees with its updated_at,
+        # as GitHub sometimes does.
+        def position(i):
+            return i.get("_sort", i["updated_at"])
+
+        items = sorted((i for i in self.issues[repo] if position(i) >= since), key=position)
         chunk = items[(page - 1) * per_page : page * per_page]
         if page * per_page < len(items):
             nxt = request.url.copy_merge_params({"page": page + 1})
@@ -339,3 +343,70 @@ def test_progress_marker_is_written_after_a_run_and_not_for_an_empty_one(gh_cfg)
     state = load_lake(gh_cfg["lake"]["root"], "gh_state")
     assert list(state["repo"]) == ["org/alpha"]
     assert pd.Timestamp(state["updated_at"].max()) == pd.Timestamp("2026-07-10 12:00:00")
+
+
+def test_out_of_order_item_does_not_make_a_capped_run_skip_a_window(gh_cfg):
+    """Regression: flutter/flutter, Oct 2026. Page 27 of a capped backfill ended with an item stamped
+    two weeks ahead of page 28; resuming from the newest value seen skipped everything in between."""
+    gh_cfg["github"].update(per_page=4, max_pages_per_repo=1)
+    issues = [gh_issue(n, f"2026-07-{n + 2:02d}T00:00:00Z") for n in range(1, 13)]
+    issues[3]["_sort"] = issues[3]["updated_at"]  # listed at the end of page 1...
+    issues[3]["updated_at"] = "2026-08-20T00:00:00Z"  # ...but claims a much later update
+    server = FakeGitHub({"org/alpha": issues})
+    _run_twice_with_server(gh_cfg, server, 6)
+    assert sorted(load_lake(gh_cfg["lake"]["root"], "gh_issues")["number"]) == list(range(1, 13))
+
+
+def test_capped_run_resumes_from_the_median_of_its_last_page(gh_cfg):
+    gh_cfg["github"].update(per_page=4, max_pages_per_repo=1)
+    issues = [gh_issue(n, f"2026-07-{n + 2:02d}T00:00:00Z") for n in range(1, 9)]
+    issues[3]["_sort"] = issues[3]["updated_at"]
+    issues[3]["updated_at"] = "2026-09-01T00:00:00Z"
+    server = FakeGitHub({"org/alpha": issues})
+    _run_twice_with_server(gh_cfg, server, 2)
+    assert server.requests[1].url.params["since"] == "2026-07-05T00:00:00Z"  # no overlap, no jump
+
+
+def test_capped_runs_always_move_forward_inside_a_burst(gh_cfg):
+    """Many updates inside one overlap window must not make a capped run re-read the same pages."""
+    gh_cfg["github"].update(per_page=2, max_pages_per_repo=1)
+    issues = [gh_issue(n, f"2026-07-10T00:{n:02d}:00Z") for n in range(1, 9)]
+    server = FakeGitHub({"org/alpha": issues})
+    _run_twice_with_server(gh_cfg, server, 8)
+    assert sorted(load_lake(gh_cfg["lake"]["root"], "gh_issues")["number"]) == list(range(1, 9))
+
+
+def test_rate_limited_run_resumes_from_the_last_page_it_finished(gh_cfg):
+    issues = [gh_issue(n, f"2026-07-{n + 2:02d}T00:00:00Z") for n in range(1, 7)]
+    server = FakeGitHub({"org/alpha": issues}, status_for={"org/alpha": [200, 403]})
+    _run_twice_with_server(gh_cfg, server, 2)
+    assert server.requests[2].url.params["since"] == "2026-07-04T00:00:00Z"
+    assert sorted(load_lake(gh_cfg["lake"]["root"], "gh_issues")["number"]) == list(range(1, 7))
+
+
+def test_rewind_refetches_a_window_without_moving_the_markers(gh_cfg):
+    issues = [gh_issue(n, f"2026-07-{n + 2:02d}T00:00:00Z") for n in range(1, 9) if n != 4]
+    server = FakeGitHub({"org/alpha": issues})
+    root = gh_cfg["lake"]["root"]
+    _run_twice_with_server(gh_cfg, server, 1)
+    marker = pd.Timestamp(load_lake(root, "gh_state")["updated_at"].max())
+    # Issue 4 sits behind the cursor (the hole): a normal run does not see it.
+    server.issues["org/alpha"].append(gh_issue(4, "2026-07-06T00:00:00Z", closed="2026-07-06T00:00:00Z"))
+    _run_twice_with_server(gh_cfg, server, 1)
+    assert 4 not in set(load_lake(root, "gh_issues")["number"])
+
+    gh_cfg["github"]["rewind"] = [
+        {"repo": "org/alpha", "since": "2026-07-05T00:00:00Z", "until": "2026-07-06T12:00:00"}
+    ]
+    first_rewind_request = len(server.requests)
+    assert _run_twice_with_server(gh_cfg, server, 1) == [(1, 0)]
+    stored = load_lake(root, "gh_issues")
+    assert sorted(stored["number"]) == list(range(1, 9))
+    assert stored[stored["number"] == 4].iloc[0]["state"] == "closed"
+    assert pd.Timestamp(load_lake(root, "gh_state")["updated_at"].max()) == marker
+    rewind = [
+        r
+        for r in server.requests[first_rewind_request:]
+        if r.url.params.get("since") == "2026-07-05T00:00:00Z"
+    ]
+    assert len(rewind) == 2  # stops once a whole page is past `until`, not at the end of the list

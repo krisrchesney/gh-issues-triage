@@ -71,6 +71,7 @@ The first backfill is capped at `max_pages_per_repo` pages per repo per run; re-
 - **The baseline must be beaten.** Logistic regression stays champion unless a challenger gains at least 0.01 ROC AUC.
 - **DuckDB + Parquet, not a warehouse.** Free and local; no managed-warehouse experience is claimed.
 - **Known collection gap.** Position-based pagination can skip an issue at a page boundary if an older issue is updated mid-run; expect a few missing rows per large backfill. Skips are unrelated to the outcome, so bias is negligible.
+- **Collection bug found and repaired (Oct 2026).** GitHub's `sort=updated` list is not strictly ordered: during the flutter/flutter backfill, one item reported an `updated_at` two weeks ahead of its neighbours. The collector resumed from the newest value it had seen, so a capped run skipped every issue last updated between Aug 26 and Sep 9, 2026: 237 of 2,135 flutter issues created since `coverage_start`, 155 of them closed. That gap was **not** random with respect to the label. A check against GitHub's search counts found the other three repositories complete. Capped runs now resume from the median of their last page. Status: the missing window is being re-fetched with a one-off `github.rewind` entry; this note will be updated with the verified result.
 
 ## Results
 

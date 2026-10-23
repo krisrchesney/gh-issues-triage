@@ -17,9 +17,20 @@ leave no rows behind, progress is also recorded in a small lake source, `gh_stat
 processed per repo), written after the rows are stored. Without it a page holding only old issues would
 leave the cursor where it was and a capped run would fetch the same pages forever.
 
-Resumable: the cursor per repository is the newer of the newest stored `updated_at` and the `gh_state`
-progress marker. Issues are fetched oldest-update-first, so a run cut short by the rate limit or
-`max_pages_per_repo` resumes where it stopped.
+Resumable: the cursor per repository is the `gh_state` progress marker (or, for a lake written before
+markers existed, the newest stored `updated_at`). Issues are fetched oldest-update-first, so a run cut
+short by the rate limit or `max_pages_per_repo` resumes where it stopped.
+
+GitHub's "sort=updated" order is not strictly monotonic in the returned `updated_at`: an item can
+report a timestamp days ahead of its neighbours (seen on flutter/flutter, where page 27 of a backfill
+ended with an item stamped two weeks later than page 28 began). So a run that is cut short resumes
+from the median `updated_at` of its last page, never the newest seen; the worst case is re-reading
+half a page. Only a run that reached the end of the list records the newest value.
+
+Repairs: `github.rewind` in the config lists one-off windows to re-fetch, e.g.
+`[{repo: org/name, since: "2026-08-26T16:00:00Z", until: "2026-09-10T00:00:00Z"}]`. Rewinds run after
+the normal pass, upsert like any other rows and never move the progress markers. Remove an entry once
+its run has been verified.
 
 Known limitation: list endpoints are paginated by position. If an already-passed issue is updated
 while a run is mid-flight it moves to the end of the list and one issue at a page boundary can be
@@ -131,6 +142,11 @@ def normalise_issue(issue: dict[str, Any], repo: str, salt: str) -> dict[str, An
     }
 
 
+def _utc_naive(value: Any) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    return ts.tz_localize(None) if ts.tzinfo is None else ts.tz_convert("UTC").tz_localize(None)
+
+
 def _to_utc(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, utc=True).dt.tz_localize(None).astype("datetime64[ns]")
 
@@ -167,6 +183,7 @@ class GitHubIssuesCollector:
         self.token = os.environ.get(gh.get("token_env", "GITHUB_TOKEN"))
         self._transport = transport
         self._sleep = sleep
+        self.rewinds: list[dict[str, Any]] = list(gh.get("rewind") or [])
         self.pages_fetched = 0
         self.stopped_early = False
         self.skipped_before_coverage = 0
@@ -234,8 +251,15 @@ class GitHubIssuesCollector:
         return max(since, floor)
 
     def _fetch_repo(
-        self, client: httpx.Client, repo: str, since: datetime, out: list[dict[str, Any]]
+        self,
+        client: httpx.Client,
+        repo: str,
+        since: datetime,
+        out: list[dict[str, Any]],
+        until: pd.Timestamp | None = None,
     ) -> None:
+        """Fetch one repository from `since`. With `until` (a rewind), stop once a whole page is past it
+        and leave the progress markers alone."""
         params: dict[str, Any] | None = {
             "state": "all",
             "sort": "updated",
@@ -245,27 +269,55 @@ class GitHubIssuesCollector:
         }
         url: str | None = f"/repos/{repo}/issues"
         pages = 0
-        while url and pages < self.max_pages:
-            resp = self._get(client, url, params)
-            params = None  # the "next" link already carries every parameter
-            pages += 1
-            self.pages_fetched += 1
-            for item in resp.json():
-                updated = pd.Timestamp(item["updated_at"]).tz_convert("UTC").tz_localize(None)
-                if repo not in self._progress or updated > self._progress[repo]:
-                    self._progress[repo] = updated
-                if "pull_request" in item:
-                    continue
-                created = pd.Timestamp(item["created_at"]).tz_convert("UTC").tz_localize(None)
-                if created < self.coverage_start:
-                    self.skipped_before_coverage += 1
-                    continue
-                out.append(normalise_issue(item, repo, self.salt))
-            remaining = resp.headers.get("x-ratelimit-remaining")
-            if remaining is not None and int(remaining) < self.min_remaining:
-                self.stopped_early = True
-                raise RateLimited(f"only {remaining} requests left in this window")
-            url = self._next_url(resp)
+        newest: pd.Timestamp | None = None
+        last_page: list[pd.Timestamp] = []
+        try:
+            while url and pages < self.max_pages:
+                resp = self._get(client, url, params)
+                params = None  # the "next" link already carries every parameter
+                pages += 1
+                self.pages_fetched += 1
+                page: list[pd.Timestamp] = []
+                for item in resp.json():
+                    updated = pd.Timestamp(item["updated_at"]).tz_convert("UTC").tz_localize(None)
+                    newest = updated if newest is None or updated > newest else newest
+                    page.append(updated)
+                    if "pull_request" in item:
+                        continue
+                    created = pd.Timestamp(item["created_at"]).tz_convert("UTC").tz_localize(None)
+                    if created < self.coverage_start:
+                        self.skipped_before_coverage += 1
+                        continue
+                    out.append(normalise_issue(item, repo, self.salt))
+                if page:
+                    last_page = page
+                remaining = resp.headers.get("x-ratelimit-remaining")
+                if remaining is not None and int(remaining) < self.min_remaining:
+                    self.stopped_early = True
+                    raise RateLimited(f"only {remaining} requests left in this window")
+                url = self._next_url(resp)
+                if until is not None and page and min(page) > until:
+                    return
+        finally:
+            if until is None:
+                self._record_progress(repo, newest if url is None else None, last_page)
+
+    def _record_progress(self, repo: str, newest: pd.Timestamp | None, last_page: list[pd.Timestamp]) -> None:
+        """Choose the marker the next run resumes from (it starts at marker - overlap).
+
+        End of list reached (`newest` given): everything was read, so the newest value is safe.
+        Cut short: resume at the median `updated_at` of the last page read, which a few out-of-order
+        items cannot drag forward, and add the overlap back so the next run starts exactly there:
+        re-reading behind it could stall forever inside a burst of updates.
+        """
+        if newest is not None:
+            mark = newest
+        elif last_page:
+            mark = sorted(last_page)[len(last_page) // 2] + self.overlap
+        else:
+            return
+        if repo not in self._progress or mark > self._progress[repo]:
+            self._progress[repo] = mark
 
     def commit(self) -> None:
         """Runs after the rows are stored: record how far this run got, per repository."""
@@ -284,10 +336,10 @@ class GitHubIssuesCollector:
 
     def fetch(self) -> pd.DataFrame:
         root = self.cfg["lake"]["root"]
+        # The progress marker wins when present: a stored row can carry an out-of-order updated_at,
+        # so the newest stored value is only a fallback for lakes written before markers existed.
         cursors = lake_cursors(root, self.name, "updated_at", "repo")
-        for repo_name, marker in lake_cursors(root, "gh_state", "updated_at", "repo").items():
-            if repo_name not in cursors or marker > cursors[repo_name]:
-                cursors[repo_name] = marker
+        cursors.update(lake_cursors(root, "gh_state", "updated_at", "repo"))
         rows: list[dict[str, Any]] = []
         with self._client() as client:
             for repo in self.repos:
@@ -298,6 +350,18 @@ class GitHubIssuesCollector:
                     print(f"[gh_issues] stopping early on {repo}: {exc}", file=sys.stderr)
                     self.stopped_early = True
                     break
+            for rw in self.rewinds if not self.stopped_early else []:
+                since = _utc_naive(rw["since"]).to_pydatetime().replace(tzinfo=UTC)
+                until = _utc_naive(rw["until"])
+                before = len(rows)
+                try:
+                    self._fetch_repo(client, rw["repo"], since, rows, until=until)
+                except RateLimited as exc:
+                    print(f"[gh_issues] rewind stopped early on {rw['repo']}: {exc}", file=sys.stderr)
+                    self.stopped_early = True
+                    break
+                found = len(rows) - before
+                print(f"[gh_issues] rewind {rw['repo']} {rw['since']}..{rw['until']}: {found} issue rows")
         if not self.token:
             print(
                 "[gh_issues] no GITHUB_TOKEN set: unauthenticated limit is 60 requests/hour", file=sys.stderr
@@ -307,7 +371,9 @@ class GitHubIssuesCollector:
         df = pd.DataFrame(rows)
         for col in ("created_at", "updated_at", "closed_at"):
             df[col] = _to_utc(df[col])
-        return df
+        # A rewind can overlap the normal pass; keep the newest version of each issue.
+        df = df.sort_values("updated_at", kind="stable").drop_duplicates(self.key_cols, keep="last")
+        return df.reset_index(drop=True)
 
 
 def check_repos(cfg: dict[str, Any], transport: httpx.BaseTransport | None = None) -> list[dict[str, Any]]:
