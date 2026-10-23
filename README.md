@@ -2,7 +2,7 @@
 
 Predicts, **at the moment a GitHub issue is opened**, whether maintainers will close it within 14 days. Trained on issues from large Google-backed open-source repositories, served through a validated FastAPI endpoint, and monitored for data and performance drift.
 
-> Status: pipeline and tests are complete. **No real-data results are published here yet**: the first collection run happens on your GitHub account. Numbers will be added to the Results section after that run; none are claimed before it.
+> Status: collecting on a schedule since Oct 20, 2026. **First real-data results (Oct 23, 2026) are in the [Results](#results) section**, with their caveats.
 
 ## Why this project
 
@@ -75,7 +75,23 @@ The first backfill is capped at `max_pages_per_repo` pages per repo per run; re-
 
 ## Results
 
-_Not yet generated._ After the first real run, add: ROC AUC / average precision / calibration (ECE) for the baseline and the champion, the SHAP importance chart from `reports/`, and the Evidently drift report.
+**First real run: Oct 23, 2026** (model `v20261023T030552Z`). 2,983 labelled issues from angular, flutter, golang and tensorflow, created Jul 31 to Oct 9, 2026 (after the 30-day warm-up; every issue at least 14 days old). Time-ordered split: trained on 2,386 issues up to Sep 26, tested on the newest 597 (Sep 26 to Oct 9). Closed within 14 days: 47.3% in training, 40.9% in test.
+
+| Model | ROC AUC | Avg precision | Brier | ECE |
+|---|---|---|---|---|
+| Logistic baseline | 0.641 | 0.497 | 0.240 | 0.109 |
+| **HistGradientBoosting (champion)** | **0.665** | **0.645** | **0.221** | **0.093** |
+| LightGBM | 0.653 | 0.639 | 0.233 | 0.127 |
+
+- The signal is modest. A bootstrap of the test set (2,000 resamples) puts the AUC gain over the baseline at -0.008 to +0.055 (95%): likely, not proven, at this sample size.
+- Per repository, the champion beats the baseline on golang (0.64 vs 0.54) and angular (0.68 vs 0.48, only 50 issues), but not on flutter (0.66 vs 0.68) or tensorflow (0.54 vs 0.57, 38 issues).
+- Probabilities run high (ECE 0.09), partly because the 14-day close rate fell from 47% to 41% between the training and test periods.
+- Most important features (mean |SHAP|): body_words, author_prior_issues, repo_median_ttc_30d_hours, repo_arrivals_7d, n_images.
+
+![SHAP feature importance](reports/shap_importance.png)
+
+- Drift (PSI): the four repository-level context features are flagged (PSI 1.6 to 2.9). Each repository's value barely moves inside a two-week window, so this reflects the short window, not a broken input; per-issue features are stable (max PSI 0.14). No issue created after the training cutoff has a final label yet, so "live" AUC currently equals the test AUC.
+- This run used the repaired data described under "Collection bug found and repaired".
 
 ## Limitations
 
