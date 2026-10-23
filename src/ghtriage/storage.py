@@ -31,7 +31,7 @@ def table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
     _check_identifier(table)
     row = con.execute(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [table]
-    ).fetchone()
+    ).fetchall()[0]
     return bool(row and row[0])
 
 
@@ -56,7 +56,7 @@ def append_dedup(con: duckdb.DuckDBPyConnection, table: str, df: pd.DataFrame, k
         return 0
     if not table_exists(con, table):
         return write_frame(con, table, df)
-    before = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    before = con.execute(f"SELECT COUNT(*) FROM {table}").fetchall()[0][0]
     con.register("_incoming", df)
     join = " AND ".join(f"t.{c} = i.{c}" for c in key_cols)
     con.execute(
@@ -64,7 +64,7 @@ def append_dedup(con: duckdb.DuckDBPyConnection, table: str, df: pd.DataFrame, k
         f"WHERE NOT EXISTS (SELECT 1 FROM {table} t WHERE {join})"
     )
     con.unregister("_incoming")
-    after = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    after = con.execute(f"SELECT COUNT(*) FROM {table}").fetchall()[0][0]
     return after - before
 
 

@@ -17,6 +17,10 @@ github:
   per_page: 100
   max_pages_per_repo: 30      # per run; larger backfills resume automatically on the next run
   overlap_minutes: 60         # re-read a little history each run (upserts make this safe)
+  # One-off repairs: re-fetch an updated_at window without moving the progress markers.
+  # Example: - {repo: org/name, since: "2026-08-26T16:00:00Z", until: "2026-09-10T00:00:00Z"}
+  # Remove each entry once its run has been checked; every run repeats it while it is listed.
+  rewind: []
   min_rate_limit_remaining: 50
   api_version: null           # null = GitHub's default version; set only if you verify a newer one
   token_env: GITHUB_TOKEN
