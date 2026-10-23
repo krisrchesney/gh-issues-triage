@@ -20,7 +20,8 @@ github:
   # One-off repairs: re-fetch an updated_at window without moving the progress markers.
   # Example: - {repo: org/name, since: "2026-08-26T16:00:00Z", until: "2026-09-10T00:00:00Z"}
   # Remove each entry once its run has been checked; every run repeats it while it is listed.
-  rewind: []
+  rewind:
+    - {repo: flutter/flutter, since: "2026-08-26T16:00:00Z", until: "2026-09-10T00:00:00Z"}  # repair, Oct 2026
   min_rate_limit_remaining: 50
   api_version: null           # null = GitHub's default version; set only if you verify a newer one
   token_env: GITHUB_TOKEN
