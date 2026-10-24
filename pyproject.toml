@@ -25,7 +25,9 @@ dependencies = [
 # Kept out of the core dependencies so the serving image stays small.
 train = ["mlflow>=3.0", "lightgbm>=4.3"]
 explain = ["shap>=0.46", "matplotlib>=3.8"]
-monitor = ["evidently>=0.7"]
+# pandas 3.1.0 (2026-10-22) removed an internal that Evidently 0.7.23 imports; lift the cap
+# once an Evidently release supports pandas 3.1.
+monitor = ["evidently>=0.7", "pandas<3.1"]
 dev = ["ghtriage[train,explain,monitor]", "pytest>=8", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]
