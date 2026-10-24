@@ -20,7 +20,8 @@ def evidently_html(
         from evidently import Report
         from evidently.presets import DataDriftPreset
     except ImportError as exc:
-        raise RuntimeError(MISSING_MSG) from exc
+        # Report the real cause: an installed but incompatible Evidently also raises ImportError.
+        raise RuntimeError(f"{MISSING_MSG} (import failed: {exc})") from exc
     snapshot = Report([DataDriftPreset()]).run(current[features], reference[features])
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
