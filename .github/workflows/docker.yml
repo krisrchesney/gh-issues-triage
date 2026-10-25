@@ -1,0 +1,64 @@
+name: docker
+
+# Builds the serving image with a model trained on the collected data, starts the container and calls
+# the API (/health, /model-info, /predict). Proves the Dockerfile works end to end; nothing is pushed.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - pyproject.toml
+      - "src/**"
+      - "config/**"
+      - .github/workflows/docker.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[train]"
+      - name: Train a model on the collected data (the image copies models/)
+        run: |
+          bash scripts/data_sync.sh pull
+          python -m ghtriage.cli build
+          python -m ghtriage.cli train
+      - name: Build image
+        run: docker build -t ghtriage:ci .
+      - name: Start the container and call the API
+        run: |
+          docker run -d --name app -p 8000:8000 ghtriage:ci
+          for i in $(seq 1 30); do curl -fsS localhost:8000/health && break; sleep 2; done
+          echo
+          python - <<'PY'
+          import glob, json, urllib.request
+          import pandas as pd
+
+          base = "http://localhost:8000"
+          card = json.load(urllib.request.urlopen(f"{base}/model-info"))
+          ref = pd.read_parquet(glob.glob("models/*/reference.parquet")[0])[card["features"]].dropna()
+          record = {f: float(ref[f].iloc[0]) for f in card["features"]}
+          req = urllib.request.Request(
+              f"{base}/predict",
+              data=json.dumps({"records": [record]}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          out = json.load(urllib.request.urlopen(req))
+          p = out["predictions"][0]["probability"]
+          assert 0.0 <= p <= 1.0, out
+          print(f"predict OK: model {out['model_version']}, probability {p:.4f}")
+          PY
+      - name: Container status and logs
+        if: always()
+        run: |
+          docker inspect --format '{{.State.Health.Status}}' app || true
+          docker logs app || true
