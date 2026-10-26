@@ -5,7 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 GHTRIAGE_REGISTRY_DIR=/app/mode
 
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+# libgomp1: OpenMP runtime the LightGBM wheel links against (not in the slim image).
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir ".[serve]"
 
 # Run `make train` first so models/ exists, or mount it as a volume instead of copying.
 COPY config ./config

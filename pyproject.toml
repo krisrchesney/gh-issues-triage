@@ -24,6 +24,8 @@ dependencies = [
 # Full MLflow (not mlflow-skinny): the SQLite tracking store needs SQLAlchemy and Alembic.
 # Kept out of the core dependencies so the serving image stays small.
 train = ["mlflow>=3.0", "lightgbm>=4.3"]
+# What the serving image needs to load any champion: LightGBM models unpickle only with lightgbm installed.
+serve = ["lightgbm>=4.3"]
 explain = ["shap>=0.46", "matplotlib>=3.8"]
 # pandas 3.1.0 (2026-10-22) removed an internal that Evidently 0.7.23 imports; lift the cap
 # once an Evidently release supports pandas 3.1.
