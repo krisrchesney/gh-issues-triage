@@ -1,0 +1,53 @@
+name: pages
+
+# Publishes the "Issue Triage Watch" page to GitHub Pages: rebuilds the dataset from the data
+# branch, trains, scores open recent issues and replays recent weeks. Runs after each
+# successful collect run and on demand.
+on:
+  workflow_run:
+    workflows: [collect]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[train]"
+      - name: Restore history from the data branch
+        run: bash scripts/data_sync.sh pull
+      - name: Build dataset and train
+        run: |
+          python -m ghtriage.cli build
+          python -m ghtriage.cli train
+      - name: Build the site
+        run: python scripts/build_site.py --out site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
