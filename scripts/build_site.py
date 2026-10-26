@@ -149,8 +149,23 @@ def render(
         "</tr>"
         for r in b.head(top).itertuples()
     )
-    weeks = [f"{w:%b %d}" for w in rp["week"]] if len(rp) else []
+    trust = 'Check <a href="#does-it-work">Does it work?</a> before relying on it.'
     if len(rp):
+        weeks = [f"{w:%b %d}" for w in rp["week"]]
+        recent4 = rp.tail(4)
+        m_auc, b_auc = recent4[f"auc_{champion}"].mean(), recent4[f"auc_{BASELINE}"].mean()
+        diff = m_auc - b_auc
+        if diff >= 0.02:
+            auc_head = "Week by week, the model beats a simple baseline, modestly"
+            trust = 'It currently beats a simpler baseline, but only modestly: see <a href="#does-it-work">Does it work?</a>'
+        elif diff <= -0.02:
+            auc_head = "Week by week, a simple baseline does better than the model"
+            trust = (
+                'Right now a simpler baseline is more accurate: see <a href="#does-it-work">Does it work?</a>'
+            )
+        else:
+            auc_head = "Week by week, the model is no better than a simple baseline"
+            trust = 'Right now it is about as accurate as a much simpler baseline: see <a href="#does-it-work">Does it work?</a>'
         auc_chart = series_chart(
             "replay-auc",
             "Replayed weekly ROC AUC: model vs logistic baseline",
@@ -178,41 +193,69 @@ def render(
             ref_label="coin flip",
             xlabel="week the issues were opened",
         )
-        recent4 = rp.tail(4)
-        m_auc, b_auc = recent4[f"auc_{champion}"].mean(), recent4[f"auc_{BASELINE}"].mean()
+        pts = calibration_points(pred[pred["week"].isin(recent4["week"])])
+        lo, hi = pts[0], pts[-1]
+        lo_gap, hi_gap = lo["y"] - lo["x"], hi["x"] - hi["y"]
+        if lo_gap > 0.08 and hi_gap > 0.08:
+            cal_head = "Its probabilities are too extreme at both ends"
+        elif max(abs(p["y"] - p["x"]) for p in pts) <= 0.08:
+            cal_head = "Its probabilities roughly match what happens"
+        else:
+            cal_head = "Its probabilities are off in places"
         cal = scatter_chart(
             "calibration",
             "Calibration over the last 4 replayed weeks",
-            calibration_points(pred[pred["week"].isin(recent4["week"])]),
+            pts,
             "predicted chance of closing within 14 days (%)",
             "actually closed (%)",
         )
         replay_html = (
-            f"<p>Each point is one week of issues, scored by a model trained only on outcomes known before that "
-            f"week began. Averaged over the last 4 weeks: <b>{m_auc:.3f}</b> for the model vs <b>{b_auc:.3f}</b> "
-            f"for the logistic baseline ({int(recent4['n'].sum()):,} issues). 0.5 is a coin flip.</p>"
-            + auc_chart
-            + "<h3>Are the probabilities honest?</h3><p>The same replayed predictions, grouped into eight "
-            "equal-sized bins. On the diagonal, an issue given a 40% chance closes 40% of the time.</p>" + cal
+            f"<h3>{auc_head}</h3>"
+            "<p>Each point is one week of issues, scored by a model trained only on outcomes known before that week "
+            f"began, exactly as it would have run live. Over the last 4 weeks: <b>{m_auc:.3f}</b> for the model vs "
+            f"<b>{b_auc:.3f}</b> for a logistic-regression baseline ({int(recent4['n'].sum()):,} issues). ROC AUC is "
+            "the chance that a randomly picked closed issue was ranked above a randomly picked stalled one: 0.5 is a "
+            "coin flip, 1.0 is perfect.</p>" + auc_chart + f"<h3>{cal_head}</h3>"
+            f"<p>The same replayed predictions in eight equal-sized groups. Issues given about {lo['x'] * 100:.0f}% "
+            f"closed {lo['y'] * 100:.0f}% of the time; issues given about {hi['x'] * 100:.0f}% closed "
+            f"{hi['y'] * 100:.0f}% of the time. On the diagonal, the predicted chance would match reality.</p>"
+            + cal
         )
+        tile_auc = f"<b>{m_auc:.3f}</b>replayed ROC AUC, last 4 weeks (baseline {b_auc:.3f})"
     else:
         replay_html = "<p>Not enough history yet for a replay.</p>"
-        m_auc = None
+        tile_auc = "<b>n/a</b>replayed ROC AUC"
     labels, series = rates
-    rates_html = series_chart(
-        "close-rates",
-        "Share of issues closed within 14 days, by week opened",
-        labels,
-        series,
-        0.0,
-        1.0,
-        fmt="pct",
-        xlabel="week the issues were opened",
-    )
-    tile_auc = (
-        f"<b>{m_auc:.3f}</b>replayed ROC AUC, last 4 weeks"
-        if m_auc is not None
-        else "<b>n/a</b>replayed ROC AUC"
+    recent_means = {
+        s["name"]: float(np.mean(v)) for s in series if (v := [y for y in s["y"][-4:] if y is not None])
+    }
+    if recent_means:
+        hi_repo = max(recent_means, key=recent_means.get)
+        lo_repo = min(recent_means, key=recent_means.get)
+        spread = recent_means[hi_repo] - recent_means[lo_repo]
+        rates_head = (
+            f"Close rates differ widely by project: {hi_repo.split('/')[1]} {recent_means[hi_repo] * 100:.0f}% vs "
+            f"{lo_repo.split('/')[1]} {recent_means[lo_repo] * 100:.0f}%"
+            if spread >= 0.10
+            else "Close rates are similar across projects"
+        )
+    else:
+        rates_head = "Close rates by project"
+    rates_html = (
+        f"<h3>{rates_head}</h3>"
+        f"<p>Share of issues closed within {horizon} days, by the week they were opened (averages above are over the "
+        "last 4 weeks). Rates move from week to week too, which is one reason a model's probabilities drift. Weeks "
+        "with fewer than 15 issues in a project are left out.</p>"
+        + series_chart(
+            "close-rates",
+            "Share of issues closed within 14 days, by week opened",
+            labels,
+            series,
+            0.0,
+            1.0,
+            fmt="pct",
+            xlabel="week the issues were opened",
+        )
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -222,17 +265,23 @@ def render(
 <title>Issue Triage Watch</title>
 <meta name="description" content="New GitHub issues in tensorflow, flutter, angular and golang ranked by predicted chance of stalling, with a weekly out-of-time replay of the model's accuracy.">
 <style>
-:root {{ --bg:#fbfbfa; --fg:#1d1d1b; --muted:#66655f; --line:#e3e2dc; --accent:#1c5cab; --row:#f3f2ee; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg:#151513; --fg:#ecebe6; --muted:#a3a29b; --line:#33322e; --accent:#86b6ef; --row:#1e1e1b; }} }}
+:root {{ --bg:#fbfbfa; --fg:#1d1d1b; --muted:#66655f; --line:#e3e2dc; --accent:#1c5cab; --row:#f3f2ee; --card:#f3f2ee; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#151513; --fg:#ecebe6; --muted:#a3a29b; --line:#33322e; --accent:#86b6ef; --row:#1e1e1b; --card:#1e1e1b; }} }}
 * {{ box-sizing:border-box; }}
 body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }}
 main {{ max-width:1040px; margin:0 auto; padding:32px 16px 48px; }}
-h1 {{ font-size:1.6rem; margin:0 0 4px; letter-spacing:-.01em; }}
-h2 {{ font-size:1.1rem; margin:32px 0 8px; }}
-h3 {{ font-size:1rem; margin:24px 0 6px; }}
+h1 {{ font-size:1.7rem; margin:0 0 6px; letter-spacing:-.01em; }}
+h2 {{ font-size:1.25rem; margin:40px 0 8px; padding-top:16px; border-top:1px solid var(--line); }}
+h3 {{ font-size:1rem; margin:28px 0 6px; }}
 p, li {{ max-width:72ch; }}
+.lede {{ font-size:1.05rem; max-width:68ch; }}
 .muted {{ color:var(--muted); }}
 a {{ color:var(--accent); }}
+.guide {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:14px; margin:20px 0; }}
+.guide section {{ background:var(--card); border-radius:8px; padding:14px 16px; }}
+.guide h3 {{ margin:0 0 6px; }}
+.guide ol, .guide ul {{ margin:0; padding-left:20px; }}
+.guide li {{ margin:4px 0; }}
 .stats {{ display:flex; flex-wrap:wrap; gap:12px; margin:20px 0; }}
 .stat {{ border:1px solid var(--line); border-radius:8px; padding:10px 14px; min-width:150px; }}
 .stat b {{ display:block; font-size:1.3rem; }}
@@ -250,45 +299,70 @@ footer {{ margin-top:40px; font-size:.85rem; }}
 <body>
 <main>
 <h1>Issue Triage Watch</h1>
-<p class="muted">Which newly opened issues in four large open-source projects are least likely to be closed within
-{horizon} days? Predicted at the moment each issue is opened, from what was knowable then. Rebuilt every 6 hours.
-Built {html.escape(built)}.</p>
+<p class="lede">Large open-source projects receive hundreds of new issues a week, and some sit unanswered. This page
+looks at every issue opened in the last {horizon} days in four big projects (TensorFlow, Flutter, Angular and Go) and
+estimates, as of the moment each one was opened, how likely it is to be closed within {horizon} days. The issues least
+likely to be closed are listed first, as candidates for a maintainer's or contributor's attention.</p>
+<p class="muted">Rebuilt every 6 hours. Built {html.escape(built)}.</p>
+
+<div class="guide">
+<section>
+<h3>How it works</h3>
+<ul>
+<li>Every 6 hours, new and updated issues are collected from the GitHub API.</li>
+<li>A model trained on earlier issues whose {horizon}-day outcome is known scores each new issue from facts available
+when it was opened: title and body length, code blocks, links, stack traces, the author's earlier issues in the
+project, and how busy the project was that week.</li>
+<li>It never sees comments, labels or later edits, and "closed" means closed for any reason, including as a
+duplicate or not planned.</li>
+</ul>
+</section>
+<section>
+<h3>How to use it</h3>
+<ol>
+<li>Open the <a href="#stalled">stalled-issue list</a>: issues are sorted by lowest chance of being closed. Click
+one to open it on GitHub.</li>
+<li>Use it to spot issues that may need a reply, a label or a reproduction, not as a forecast of what maintainers
+will do.</li>
+<li>{trust}</li>
+</ol>
+</section>
+<section>
+<h3>What it can't do</h3>
+<ul>
+<li>It does not read what an issue says, only measures of it (lengths and counts).</li>
+<li>Its accuracy is modest, and its probabilities are not exact.</li>
+<li>It was trained on four large projects and may not transfer to small ones.</li>
+</ul>
+</section>
+</div>
 
 <div class="stats">
   <div class="stat"><b>{len(b):,}</b>open issues opened in the last {horizon} days</div>
   <div class="stat">{tile_auc}</div>
   <div class="stat"><b>{html.escape(card["champion"])}</b>model <code>{html.escape(version)}</code></div>
-  <div class="stat"><b>4</b>repos: tensorflow, flutter, angular, golang</div>
+  <div class="stat"><b>4</b>projects: tensorflow, flutter, angular, golang</div>
 </div>
 
-<h2>Most likely to stall</h2>
-<p>Still-open issues from the last {horizon} days with the lowest predicted chance of being closed within {horizon}
-days of opening. Closed for any reason counts as closed.</p>
-<div class="wrap"><table>
-<thead><tr><th>Repo</th><th>Issue</th><th>Title</th><th>Opened</th><th class="num">Age (days)</th><th class="num">Chance closed &le;{horizon}d</th></tr></thead>
-<tbody>{rows}</tbody></table></div>
-
-<h2>How accurate is it, week by week?</h2>
+<h2 id="does-it-work">Does it work?</h2>
+<p>Every outcome older than {horizon} days is already used for training, so the honest check is a replay: for each
+recent week, train only on what was known before it started, then score that week's issues.</p>
 {replay_html}
-
-<h2>Close rates are not stable</h2>
-<p>The share of issues closed within {horizon} days moves from week to week and differs a lot by project, which is
-part of why the model's probabilities drift. Weeks with fewer than 15 issues in a repo are left out.</p>
 {rates_html}
 
-<h2>How to read this</h2>
-<ul>
-<li>A triage aid, not a verdict: the model sees only creation-time facts (text statistics, the author's prior issues
-in the repo, recent repo activity), never comments, labels or later edits.</li>
-<li>"Closed" includes closed as duplicate or not planned, so a fast close is not always a fix.</li>
-<li>Accuracy is modest. Details, leakage controls and caveats are in the
-<a href="https://github.com/krisrchesney/gh-issues-triage#results">project README</a>.</li>
-</ul>
+<h2 id="data">The data</h2>
+<h3 id="stalled">Most likely to stall: top {top} open issues from the last {horizon} days</h3>
+<div class="wrap"><table>
+<thead><tr><th>Project</th><th>Issue</th><th>Title</th><th>Opened</th><th class="num">Age (days)</th><th class="num">Chance closed &le;{horizon}d</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<p class="muted">Chance closed: the model's estimate, made when the issue was opened, that it would be closed within
+{horizon} days. Titles are as first seen; no usernames or issue bodies are stored.</p>
+
+<p><a href="data.json">Download this page's data (JSON)</a> · <a href="https://github.com/krisrchesney/gh-issues-triage#results">Full results and caveats in the README</a></p>
 
 <footer class="muted">
 <p>Code: <a href="https://github.com/krisrchesney/gh-issues-triage">github.com/krisrchesney/gh-issues-triage</a>.
-Data from the GitHub REST API (public repositories). No usernames or issue bodies are stored. Not affiliated with
-GitHub or the projects shown.</p>
+Data from the GitHub REST API (public repositories). Not affiliated with GitHub or the projects shown.</p>
 </footer>
 </main>
 <div id="tip" role="tooltip"></div>
