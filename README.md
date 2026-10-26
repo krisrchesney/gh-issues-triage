@@ -3,6 +3,8 @@
 Predicts, **at the moment a GitHub issue is opened**, whether maintainers will close it within 14 days. Trained on issues from large Google-backed open-source repositories, served through a validated FastAPI endpoint, and monitored for data and performance drift.
 
 > Status: collecting on a schedule since Oct 20, 2026. **First real-data results (Oct 23, 2026) are in the [Results](#results) section**, with their caveats.
+>
+> **Live page:** [krisrchesney.github.io/gh-issues-triage](https://krisrchesney.github.io/gh-issues-triage/), with open issues most likely to stall plus a weekly out-of-time replay of the model's accuracy. Rebuilt after each collection run by `.github/workflows/pages.yml`.
 
 ## Why this project
 
@@ -84,6 +86,7 @@ The first backfill is capped at `max_pages_per_repo` pages per repo per run; re-
 | LightGBM | 0.653 | 0.639 | 0.233 | 0.127 |
 
 - The signal is modest. A bootstrap of the test set (2,000 resamples) puts the AUC gain over the baseline at -0.008 to +0.055 (95%): likely, not proven, at this sample size.
+- **A weekly replay is less flattering (added Oct 26, 2026).** Retraining for each week on only the outcomes known before it began, then scoring that week's issues, gave the model (LightGBM, the champion that day) a mean ROC AUC of 0.655 over the four weeks Sep 14 to Oct 11 (1,305 issues) vs 0.657 for the logistic baseline. Week to week the two trade places (model 0.495 to 0.721, baseline 0.538 to 0.702). On this evidence the model does not beat the baseline; the single test split above overstated the gain. The live page reruns this replay every 6 hours.
 - Per repository, the champion beats the baseline on golang (0.64 vs 0.54) and angular (0.68 vs 0.48, only 50 issues), but not on flutter (0.66 vs 0.68) or tensorflow (0.54 vs 0.57, 38 issues).
 - Probabilities run high (ECE 0.09), partly because the 14-day close rate fell from 47% to 41% between the training and test periods.
 - Most important features (mean |SHAP|): body_words, author_prior_issues, repo_median_ttc_30d_hours, repo_arrivals_7d, n_images.
