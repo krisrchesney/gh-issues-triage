@@ -271,16 +271,21 @@ def series_chart(
     ref: float | None = None,
     ref_label: str = "",
     xlabel: str = "",
+    tick_step: float = 0.25,
 ) -> str:
     """Lines over evenly spaced categories (e.g. weeks). series: [{"name", "short", "var", "y": list with
     None for missing}]. fmt "pct" shows 0.42 as 42%, "num" as 0.420. Optional horizontal reference line."""
-    W, H, L, R, T, B = 500, 300, 42, 92, 14, 40
+    W, H, L, R, T, B = 500, 300, 42, 112, 14, 40
     x0, x1, y0, y1 = L, W - R, H - B, T
     n = len(xlabels)
     X = lambda i: x0 + (i / max(n - 1, 1)) * (x1 - x0)  # noqa: E731
     Y = lambda v: y0 - (v - y_lo) / (y_hi - y_lo) * (y0 - y1)  # noqa: E731
-    label = (lambda v: f"{v * 100:.0f}%") if fmt == "pct" else (lambda v: f"{v:.2f}")
-    ticks = np.linspace(y_lo, y_hi, 5)
+    label = (
+        (lambda v: f"{v * 100:.0f}%")
+        if fmt == "pct"
+        else (lambda v: f"{v:.1f}" if abs(v * 10 - round(v * 10)) < 1e-9 else f"{v:.2f}")
+    )
+    ticks = np.arange(y_lo, y_hi + tick_step / 2, tick_step)  # clean, evenly stepped ticks
     parts = [
         f'<svg viewBox="0 0 {W} {H}" role="img" aria-labelledby="{chart_id}-t" data-line="__DATA__">',
         f'<title id="{chart_id}-t">{html.escape(title)}</title>',

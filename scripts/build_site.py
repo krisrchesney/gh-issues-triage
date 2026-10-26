@@ -22,6 +22,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from site_charts import CHART_CSS, CHART_JS, scatter_chart, series_chart
 from sklearn.metrics import roc_auc_score
@@ -168,9 +169,11 @@ def render(
                     "y": rp[f"auc_{BASELINE}"].tolist(),
                 },
             ],
-            0.4,
-            0.9,
+            # 0.4-0.8 normally; widen in 0.1 steps if a week ever falls outside it.
+            min(0.4, np.floor(rp[[f"auc_{champion}", f"auc_{BASELINE}"]].min().min() * 10) / 10),
+            max(0.8, np.ceil(rp[[f"auc_{champion}", f"auc_{BASELINE}"]].max().max() * 10) / 10),
             fmt="num",
+            tick_step=0.1,
             ref=0.5,
             ref_label="coin flip",
             xlabel="week the issues were opened",
