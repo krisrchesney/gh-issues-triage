@@ -278,7 +278,8 @@ def series_chart(
     W, H, L, R, T, B = 500, 300, 42, 112, 14, 40
     x0, x1, y0, y1 = L, W - R, H - B, T
     n = len(xlabels)
-    X = lambda i: x0 + (i / max(n - 1, 1)) * (x1 - x0)  # noqa: E731
+    inset = 14  # first/last points sit clear of the y-axis labels
+    X = lambda i: x0 + inset + (i / max(n - 1, 1)) * (x1 - x0 - 2 * inset)  # noqa: E731
     Y = lambda v: y0 - (v - y_lo) / (y_hi - y_lo) * (y0 - y1)  # noqa: E731
     label = (
         (lambda v: f"{v * 100:.0f}%")
@@ -351,8 +352,8 @@ def series_chart(
     )
     parts.append("</svg>")
     data = {
-        "x0": x0,
-        "x1": x1,
+        "x0": x0 + inset,
+        "x1": x1 - inset,
         "xmax": 1,
         "grid": [round(i / max(n - 1, 1), 5) for i in range(n)],
         "xlabels": xlabels,
