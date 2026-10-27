@@ -65,7 +65,31 @@ CONTEXT_FEATURES = [
     "repo_median_ttc_30d_hours",
     "repo_closed_rate_recent",
 ]
-FEATURES = ISSUE_FEATURES + CONTEXT_FEATURES
+# Title signals, computed from the title at creation (see attach_original_titles). The word lists are
+# fixed a priori from general knowledge of issue trackers, never tuned on the labels.
+TITLE_PATTERNS = {
+    "title_kw_crash": r"\b(crash\w*|segfault|panic\w*|hang\w*|freez\w*|exception|error|fail\w*)\b",
+    "title_kw_feature": r"\b(feature|support|add|allow|proposal|request|enhancement|option)\b",
+    "title_kw_docs": r"\b(doc|docs|documentation|typo|readme|example)\b",
+    "title_kw_perf": r"\b(slow|performance|memory|leak|latency)\b",
+    "title_kw_regression": r"\b(regression|regressed|broke|broken|no longer)\b",
+    "title_kw_question": r"(\?|^\s*(how|why|what|is it possible)\b)",
+    "title_platform_tag": r"^\s*\[[^\]]{1,40}\]",
+    "title_pkg_prefix": r"^\s*[\w./-]{2,40}:\s",
+    "title_conventional": r"^\s*(feat|fix|docs|chore|refactor|perf|test|build|ci)(\([^)]*\))?!?:",
+    "title_has_code": r"`",
+}
+TITLE_FEATURES = list(TITLE_PATTERNS)
+# Which project an issue belongs to: close rates differ a lot between them.
+REPO_FEATURES = ["repo_angular", "repo_flutter", "repo_go", "repo_tensorflow"]
+REPO_FEATURE_OF = {
+    "angular/angular": "repo_angular",
+    "flutter/flutter": "repo_flutter",
+    "golang/go": "repo_go",
+    "tensorflow/tensorflow": "repo_tensorflow",
+}
+FEATURES = ISSUE_FEATURES + CONTEXT_FEATURES + TITLE_FEATURES + REPO_FEATURES
+TITLE_SOURCE = "gh_titles"  # lake source with each backfilled issue's title at creation
 
 REQUIRED_RAW = [
     "repo",
@@ -109,11 +133,48 @@ def normalise(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def attach_original_titles(issues: pd.DataFrame, titles: pd.DataFrame | None) -> pd.DataFrame:
+    """Use each issue's title at creation where it is known.
+
+    The lake keeps titles "as first seen". For issues first collected long after they were opened (the
+    initial backfill), that can be a title a maintainer rewrote during triage, which leaks the outcome:
+    renamed issues close far less often. `titles` (repo, number, title_at_creation) comes from GitHub's
+    "renamed" events. Title length and word counts are recomputed from the original too.
+    """
+    df = issues.copy()
+    if titles is None or titles.empty or "title" not in df.columns:
+        return df
+    orig = titles.drop_duplicates(["repo", "number"]).set_index(["repo", "number"])["title_at_creation"]
+    keys = pd.MultiIndex.from_arrays([df["repo"], df["number"].astype(int)])
+    found = orig.reindex(keys).to_numpy()
+    has = pd.notna(found)
+    if has.any():
+        df.loc[has, "title"] = found[has]
+        df.loc[has, "title_len"] = df.loc[has, "title"].str.len()
+        df.loc[has, "title_words"] = df.loc[has, "title"].str.split().str.len()
+    return df
+
+
+def title_features(titles: pd.Series) -> pd.DataFrame:
+    text = titles.fillna("").astype(str).str.lower()
+    return pd.DataFrame(
+        {
+            name: text.str.contains(pattern, regex=True).astype(int)
+            for name, pattern in TITLE_PATTERNS.items()
+        },
+        index=titles.index,
+    )
+
+
 def compute_features(issues: pd.DataFrame, horizon_days: int) -> pd.DataFrame:
     """Add creation-time features. `issues` must already be normalised and restricted to coverage."""
     df = issues.sort_values(["repo", "created_at", "number"]).reset_index(drop=True)
     n = len(df)
     horizon_ns = int(horizon_days) * DAY_NS
+    titles = df["title"] if "title" in df.columns else pd.Series("", index=df.index)
+    df = pd.concat([df, title_features(titles)], axis=1)
+    for repo, col in REPO_FEATURE_OF.items():
+        df[col] = (df["repo"] == repo).astype(int)
 
     created = df["created_at"]
     assoc = df["author_association"].fillna("NONE")
@@ -183,10 +244,12 @@ def build_training_frame(
     horizon_days: int,
     as_of: Mapping[str, pd.Timestamp] | None = None,
     min_rows: int = 200,
+    titles: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Labelled, leak-free training rows. `as_of` is each repo's data freshness (default: newest update)."""
+    """Labelled, leak-free training rows. `as_of` is each repo's data freshness (default: newest update).
+    `titles` holds titles at creation for issues first seen late (see attach_original_titles)."""
     coverage_start = pd.Timestamp(coverage_start)
-    df = normalise(raw)
+    df = attach_original_titles(normalise(raw), titles)
     df = df[df["created_at"] >= coverage_start]
     if df.empty:
         raise ValueError(f"No issues created on or after coverage_start={coverage_start.date()}.")
@@ -233,6 +296,7 @@ def build_training_table(cfg: dict[str, Any]) -> int:
         warmup_days=int(data_cfg.get("warmup_days", 30)),
         horizon_days=int(data_cfg.get("label_horizon_days", 14)),
         min_rows=int(data_cfg.get("min_rows", 200)),
+        titles=load_lake(cfg["lake"]["root"], TITLE_SOURCE),
     )
     con = connect(data_cfg["db_path"])
     try:
