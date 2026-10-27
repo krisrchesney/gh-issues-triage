@@ -303,17 +303,31 @@ th {{ font-weight:600; color:var(--muted); background:var(--row); position:stick
 td.num, th.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 tr:last-child td {{ border-bottom:0; }}
 footer {{ margin-top:40px; font-size:.85rem; }}
+.hero {{ display:grid; grid-template-columns:minmax(0,68ch) minmax(220px,1fr); gap:28px; align-items:start; }}
+.hero .stats {{ flex-direction:column; margin:6px 0 0; }}
+.hero .stat {{ min-width:0; }}
+@media (max-width:820px) {{ .hero {{ grid-template-columns:1fr; gap:0; }} .hero .stats {{ flex-direction:row; }} .hero .stat {{ min-width:150px; }} }}
 {CHART_CSS}
 </style>
 </head>
 <body>
 <main>
 <h1>Issue Triage Watch</h1>
+<div class="hero">
+<div>
 <p class="lede">Large open-source projects receive hundreds of new issues a week, and some sit unanswered. This page
 looks at every issue opened in the last {horizon} days in four big projects (TensorFlow, Flutter, Angular and Go) and
 estimates, as of the moment each one was opened, how likely it is to be closed within {horizon} days. The issues least
 likely to be closed are listed first, as candidates for a maintainer's or contributor's attention.</p>
 <p class="muted">Rebuilt every 6 hours. Built {html.escape(built)}.</p>
+</div>
+<div class="stats">
+  <div class="stat"><b>{len(b):,}</b>open issues opened in the last {horizon} days</div>
+  <div class="stat">{tile_auc}</div>
+  <div class="stat"><b>{html.escape(card["champion"])}</b>model <code>{html.escape(version)}</code></div>
+  <div class="stat"><b>4</b>projects: tensorflow, flutter, angular, golang</div>
+</div>
+</div>
 
 <div class="guide">
 <section>
@@ -347,12 +361,6 @@ will do.</li>
 </section>
 </div>
 
-<div class="stats">
-  <div class="stat"><b>{len(b):,}</b>open issues opened in the last {horizon} days</div>
-  <div class="stat">{tile_auc}</div>
-  <div class="stat"><b>{html.escape(card["champion"])}</b>model <code>{html.escape(version)}</code></div>
-  <div class="stat"><b>4</b>projects: tensorflow, flutter, angular, golang</div>
-</div>
 
 <h2 id="does-it-work">Does it work?</h2>
 <p>Every outcome older than {horizon} days is already used for training, so the honest check is a replay: for each
