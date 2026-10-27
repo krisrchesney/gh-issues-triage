@@ -23,6 +23,7 @@ from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_s
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from ghtriage.calibration import TimeCalibrated
 from ghtriage.registry import promote
 from ghtriage.storage import connect, read_table
 
@@ -93,7 +94,18 @@ def evaluate(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
 BASELINE = "logistic_baseline"
 
 
-def build_candidates(seed: int, names: list[str] | None = None) -> dict[str, Pipeline]:
+def build_candidates(
+    seed: int, names: list[str] | None = None, calibration: str | None = None
+) -> dict[str, Any]:
+    """Build the requested candidate pipelines. The baseline is always included. With `calibration`
+    ("sigmoid" or "isotonic"), every candidate is wrapped in TimeCalibrated."""
+    built = _build_candidates(seed, names)
+    if calibration and calibration != "none":
+        return {name: TimeCalibrated(pipe, method=calibration) for name, pipe in built.items()}
+    return built
+
+
+def _build_candidates(seed: int, names: list[str] | None = None) -> dict[str, Pipeline]:
     """Build the requested candidate pipelines. The baseline is always included."""
     wanted = list(dict.fromkeys([BASELINE, *(names or [BASELINE, "hist_gbm"])]))
     factories = {
@@ -170,7 +182,7 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
 
     version = datetime.now(UTC).strftime("v%Y%m%dT%H%M%SZ")
     results: dict[str, dict[str, float]] = {}
-    fitted: dict[str, Pipeline] = {}
+    fitted: dict[str, Any] = {}
 
     with mlflow.start_run(run_name=f"train-{version}"):
         mlflow.log_params(
@@ -183,7 +195,7 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
             }
         )
         for name, pipeline in build_candidates(
-            model_cfg["random_state"], model_cfg.get("candidates")
+            model_cfg["random_state"], model_cfg.get("candidates"), model_cfg.get("calibration")
         ).items():
             with mlflow.start_run(run_name=name, nested=True):
                 pipeline.fit(x_train, y_train)

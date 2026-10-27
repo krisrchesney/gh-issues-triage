@@ -28,7 +28,13 @@ from site_charts import CHART_CSS, CHART_JS, scatter_chart, series_chart
 from sklearn.metrics import roc_auc_score
 
 from ghtriage.config import load_config
-from ghtriage.features import build_training_frame, compute_features, normalise
+from ghtriage.features import (
+    TITLE_SOURCE,
+    attach_original_titles,
+    build_training_frame,
+    compute_features,
+    normalise,
+)
 from ghtriage.lake import load_lake
 from ghtriage.registry import load_current
 from ghtriage.train import BASELINE, build_candidates, select_features
@@ -42,10 +48,12 @@ REPO_VARS = {
 MIN_TRAIN_ROWS = 500
 
 
-def load_issues(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_issues(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Raw lake rows, normalised in-coverage issues with titles at creation, and the title table."""
     raw = load_lake(cfg["lake"]["root"], "gh_issues")
-    df = normalise(raw)
-    return raw, df[df["created_at"] >= pd.Timestamp(cfg["github"]["coverage_start"])]
+    titles = load_lake(cfg["lake"]["root"], TITLE_SOURCE)
+    df = attach_original_titles(normalise(raw), titles)
+    return raw, df[df["created_at"] >= pd.Timestamp(cfg["github"]["coverage_start"])], titles
 
 
 def board(cfg: dict, issues: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, dict, str]:
@@ -74,7 +82,9 @@ def replay(cfg: dict, table: pd.DataFrame, champion: str, weeks: int = 8) -> pd.
         train = table[table["event_ts"] <= ws - horizon]
         if len(train) < MIN_TRAIN_ROWS or train[target].nunique() < 2 or week[target].nunique() < 2:
             continue
-        pipes = build_candidates(cfg["model"]["random_state"], [BASELINE, champion])
+        pipes = build_candidates(
+            cfg["model"]["random_state"], [BASELINE, champion], cfg["model"].get("calibration")
+        )
         out = {
             "week": ws,
             "n": len(week),
@@ -381,7 +391,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     horizon = int(cfg["data"].get("label_horizon_days", 14))
-    raw, issues = load_issues(cfg)
+    raw, issues, titles = load_issues(cfg)
     b, card, version = board(cfg, issues, horizon)
     table = build_training_frame(
         raw,
@@ -389,6 +399,7 @@ def main() -> None:
         warmup_days=int(cfg["data"].get("warmup_days", 30)),
         horizon_days=horizon,
         min_rows=int(cfg["data"].get("min_rows", 200)),
+        titles=titles,
     )
     rp, pred = replay(cfg, table, card["champion"])
     rates = weekly_close_rates(table)

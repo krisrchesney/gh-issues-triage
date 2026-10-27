@@ -73,12 +73,30 @@ model:
     - repo_open_30d
     - repo_median_ttc_30d_hours
     - repo_closed_rate_recent
+    # Title signals from the title at creation (fixed word lists) and which project the issue is in.
+    - title_kw_crash
+    - title_kw_feature
+    - title_kw_docs
+    - title_kw_perf
+    - title_kw_regression
+    - title_kw_question
+    - title_platform_tag
+    - title_pkg_prefix
+    - title_conventional
+    - title_has_code
+    - repo_angular
+    - repo_flutter
+    - repo_go
+    - repo_tensorflow
   candidates: [logistic_baseline, hist_gbm, lightgbm]
   test_fraction: 0.2          # most recent 20% of rows is held out (time-aware split)
   random_state: 42
   registry_dir: models
   # The challenger must beat the baseline ROC AUC by at least this much to be promoted.
   min_auc_improvement: 0.01
+  # Platt scaling learned on the latest 25% of the training window, applied to a model refitted on all
+  # rows. Weekly replay (Sep 14 - Oct 11, 2026): ranking unchanged, calibration error 0.106 -> 0.030.
+  calibration: sigmoid
 
 mlflow:
   tracking_uri: sqlite:///mlflow.db

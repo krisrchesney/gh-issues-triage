@@ -158,3 +158,58 @@ def test_no_post_creation_column_is_a_feature():
         "number",
     }
     assert forbidden.isdisjoint(FEATURES)
+
+
+def test_original_titles_replace_renamed_ones_and_their_counts():
+    from ghtriage.features import attach_original_titles
+
+    issues = pd.DataFrame(
+        {
+            "repo": ["golang/go", "golang/go"],
+            "number": [1, 2],
+            "title": ["net/http: Client leaks on redirect", "untouched title"],
+            "title_len": [34, 15],
+            "title_words": [6, 2],
+        }
+    )
+    titles = pd.DataFrame({"repo": ["golang/go"], "number": [1], "title_at_creation": ["http client leak?"]})
+    out = attach_original_titles(issues, titles)
+    assert list(out["title"]) == ["http client leak?", "untouched title"]
+    assert list(out["title_len"]) == [17, 15] and list(out["title_words"]) == [3, 2]
+
+
+def test_a_later_rename_cannot_change_title_features():
+    """Regression guard: maintainers' retitling during triage must not reach the features."""
+    from ghtriage.features import attach_original_titles, title_features
+
+    before = pd.DataFrame(
+        {"repo": ["golang/go"], "number": [7], "title": ["it crashes"], "title_len": [10], "title_words": [2]}
+    )
+    after = before.assign(title="runtime: crash in GC on arm64", title_len=29, title_words=6)
+    orig = pd.DataFrame({"repo": ["golang/go"], "number": [7], "title_at_creation": ["it crashes"]})
+    a = title_features(attach_original_titles(before, orig)["title"])
+    b = title_features(attach_original_titles(after, orig)["title"])
+    pd.testing.assert_frame_equal(a, b)
+
+
+@pytest.mark.parametrize(
+    "title,flag",
+    [
+        ("App crashes on startup", "title_kw_crash"),
+        ("Add support for dark mode", "title_kw_feature"),
+        ("Typo in README", "title_kw_docs"),
+        ("Memory leak in image cache", "title_kw_perf"),
+        ("Scrolling broken since 3.22", "title_kw_regression"),
+        ("How do I configure the router?", "title_kw_question"),
+        ("[iOS] keyboard covers text field", "title_platform_tag"),
+        ("net/http: client hangs", "title_pkg_prefix"),
+        ("feat(router): lazy guards", "title_conventional"),
+        ("`ngModel` ignores null", "title_has_code"),
+    ],
+)
+def test_title_patterns(title, flag):
+    from ghtriage.features import title_features
+
+    row = title_features(pd.Series([title])).iloc[0]
+    assert row[flag] == 1
+    assert title_features(pd.Series(["plain words only"])).iloc[0].sum() == 0
