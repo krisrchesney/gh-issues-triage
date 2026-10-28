@@ -89,6 +89,11 @@ model:
     - repo_go
     - repo_tensorflow
   candidates: [logistic_baseline, hist_gbm, lightgbm]
+  # Champion chosen on the mean of the selection metric over 4 rolling folds inside the training window
+  # (each newer block scored by a model fitted on everything before it), not on the single test split:
+  # near-tied models flipped run to run on one split. The test split is still reported.
+  selection: folds
+  selection_folds: 4
   test_fraction: 0.2          # most recent 20% of rows is held out (time-aware split)
   random_state: 42
   registry_dir: models
