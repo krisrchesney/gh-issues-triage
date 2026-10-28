@@ -69,7 +69,12 @@ def board(cfg: dict, issues: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, 
     return recent.sort_values("p_close").reset_index(drop=True), card, version
 
 
-def replay(cfg: dict, table: pd.DataFrame, champion: str, weeks: int = 8) -> pd.DataFrame:
+def replay(
+    cfg: dict, table: pd.DataFrame, champion: str, weeks: int = 8, deployed: str | None = None
+) -> pd.DataFrame:
+    """`champion` is the model compared with the baseline; predictions kept for the calibration chart
+    come from `deployed` (default: the same model)."""
+    deployed = deployed or champion
     """Per week: train on outcomes knowable at the week's start, score that week's issues."""
     horizon = pd.Timedelta(days=int(cfg["data"].get("label_horizon_days", 14)))
     feats = select_features(table, cfg)
@@ -95,7 +100,7 @@ def replay(cfg: dict, table: pd.DataFrame, champion: str, weeks: int = 8) -> pd.
             pipe.fit(train[feats], train[target])
             p = pipe.predict_proba(week[feats])[:, 1]
             out[f"auc_{name}"] = float(roc_auc_score(week[target], p))
-            if name == champion:
+            if name == deployed:
                 preds.append(pd.DataFrame({"week": ws, "p": p, "y": week[target].to_numpy()}))
         rows.append(out)
     return pd.DataFrame(rows), (pd.concat(preds) if preds else pd.DataFrame(columns=["week", "p", "y"]))
@@ -166,23 +171,29 @@ def render(
         m_auc, b_auc = recent4[f"auc_{champion}"].mean(), recent4[f"auc_{BASELINE}"].mean()
         diff = m_auc - b_auc
         if diff >= 0.02:
-            auc_head = "Week by week, the model beats a simple baseline, modestly"
+            auc_head = f"Week by week, the {champion} model beats a simple baseline, modestly"
             trust = 'It currently beats a simpler baseline, but only modestly: see <a href="#does-it-work">Does it work?</a>'
         elif diff <= -0.02:
-            auc_head = "Week by week, a simple baseline does better than the model"
+            auc_head = f"Week by week, a simple baseline does better than the {champion} model"
             trust = (
                 'Right now a simpler baseline is more accurate: see <a href="#does-it-work">Does it work?</a>'
             )
         else:
-            auc_head = "Week by week, the model is no better than a simple baseline"
+            auc_head = f"Week by week, the {champion} model is no better than a simple baseline"
             trust = 'Right now it is about as accurate as a much simpler baseline: see <a href="#does-it-work">Does it work?</a>'
+        if card["champion"] == BASELINE:
+            trust = (
+                "The live model is a simple logistic regression: the tree models did not beat it in "
+                'testing. Accuracy is modest: see <a href="#does-it-work">Does it work?</a>'
+            )
         auc_chart = series_chart(
             "replay-auc",
             "Replayed weekly ROC AUC: model vs logistic baseline",
             weeks,
             [
                 {
-                    "name": f"Model ({champion})",
+                    "name": f"Model ({champion})"
+                    + ("" if champion == card["champion"] else ", not deployed"),
                     "short": "model",
                     "var": "--s1",
                     "y": rp[f"auc_{champion}"].tolist(),
@@ -225,7 +236,11 @@ def render(
             f"began, exactly as it would have run live. Over the last 4 weeks: <b>{m_auc:.3f}</b> for the model vs "
             f"<b>{b_auc:.3f}</b> for a logistic-regression baseline ({int(recent4['n'].sum()):,} issues). ROC AUC is "
             "the chance that a randomly picked closed issue was ranked above a randomly picked stalled one: 0.5 is a "
-            "coin flip, 1.0 is perfect.</p>" + auc_chart + f"<h3>{cal_head}</h3>"
+            "coin flip, 1.0 is perfect.</p>"
+            + f'<p class="muted">Deployed model: <b>{html.escape(card["champion"])}</b>. '
+            + f"{html.escape(card['selection_reason'])}</p>"
+            + auc_chart
+            + f"<h3>{cal_head}</h3>"
             f"<p>The same replayed predictions in eight equal-sized groups. Issues given about {lo['x'] * 100:.0f}% "
             f"closed {lo['y'] * 100:.0f}% of the time; issues given about {hi['x'] * 100:.0f}% closed "
             f"{hi['y'] * 100:.0f}% of the time. On the diagonal, the predicted chance would match reality.</p>"
@@ -409,14 +424,17 @@ def main() -> None:
         min_rows=int(cfg["data"].get("min_rows", 200)),
         titles=titles,
     )
-    rp, pred = replay(cfg, table, card["champion"])
+    deployed = card["champion"]
+    # Compare the baseline with the strongest tree model even when the baseline itself is deployed.
+    challenger = deployed if deployed != BASELINE else "lightgbm"
+    rp, pred = replay(cfg, table, challenger, deployed=deployed)
     rates = weekly_close_rates(table)
     built = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.html").write_text(
-        render(b, card, version, rp, pred, rates, built, args.top, horizon, card["champion"]),
+        render(b, card, version, rp, pred, rates, built, args.top, horizon, challenger),
         encoding="utf-8",
     )
     payload = {

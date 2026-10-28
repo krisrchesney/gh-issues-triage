@@ -16,6 +16,7 @@ import joblib
 import mlflow
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -152,6 +153,39 @@ def _lightgbm_pipeline(seed: int) -> Pipeline:
     )
 
 
+def basis_label(basis: str) -> str:
+    return "mean over rolling folds" if basis == "folds" else "test split"
+
+
+def rolling_fold_scores(
+    train_df: pd.DataFrame,
+    features: list[str],
+    target: str,
+    candidates: dict[str, Any],
+    metric: str,
+    folds: int = 4,
+) -> dict[str, list[float]]:
+    """Score each candidate on `folds` consecutive validation blocks covering the newest half of the
+    (time-ordered) training rows; each block is predicted by a fresh fit on every row before it.
+
+    A single holdout picks between near-tied models on noise. Averaging over several later blocks is a
+    steadier basis for choosing the champion; the newest-20% test split stays untouched for reporting.
+    Blocks with only one class are skipped.
+    """
+    score = {"roc_auc": roc_auc_score, "avg_precision": average_precision_score}[metric]
+    n = len(train_df)
+    edges = np.linspace(n // 2, n, folds + 1).astype(int)
+    out: dict[str, list[float]] = {name: [] for name in candidates}
+    for a, b in zip(edges[:-1], edges[1:], strict=True):
+        fit_part, val = train_df.iloc[:a], train_df.iloc[a:b]
+        if fit_part[target].nunique() < 2 or val[target].nunique() < 2:
+            continue
+        for name, est in candidates.items():
+            model = clone(est).fit(fit_part[features], fit_part[target].to_numpy())
+            out[name].append(float(score(val[target].to_numpy(), model.predict_proba(val[features])[:, 1])))
+    return out
+
+
 def train(cfg: dict[str, Any]) -> dict[str, Any]:
     """Train all candidates, track them in MLflow, promote the champion. Returns the model card."""
     data_cfg, model_cfg = cfg["data"], cfg["model"]
@@ -209,21 +243,44 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
         metric = model_cfg.get("selection_metric", "roc_auc")
         if metric not in results[BASELINE]:
             raise ValueError(f"Unknown selection_metric '{metric}'. Available: {sorted(results[BASELINE])}")
-        baseline_score = results[BASELINE][metric]
+        # Selection basis: mean over rolling folds inside the training window (default), or the test split.
+        basis = model_cfg.get("selection", "folds")
+        fold_scores: dict[str, list[float]] = {}
+        if basis == "folds":
+            fold_scores = rolling_fold_scores(
+                train_df,
+                features,
+                target,
+                build_candidates(
+                    model_cfg["random_state"], model_cfg.get("candidates"), model_cfg.get("calibration")
+                ),
+                metric,
+                int(model_cfg.get("selection_folds", 4)),
+            )
+            if not all(fold_scores.values()):
+                basis = "test"  # too little data for folds: fall back to the test split
+        selected = (
+            {n: float(np.mean(v)) for n, v in fold_scores.items()}
+            if basis == "folds"
+            else {n: results[n][metric] for n in results}
+        )
+        baseline_score = selected[BASELINE]
         challengers = [n for n in results if n != BASELINE]
         threshold = model_cfg["min_auc_improvement"]  # minimum gain in the selection metric
-        best = max(challengers, key=lambda n: results[n][metric]) if challengers else None
-        gain = results[best][metric] - baseline_score if best else 0.0
+        best = max(challengers, key=lambda n: selected[n]) if challengers else None
+        gain = selected[best] - baseline_score if best else 0.0
         if best and gain >= threshold:
             champion = best
             reason = (
-                f"Best challenger ({best}) beat the baseline by {gain:.3f} {metric}, above the "
+                f"Best challenger ({best}) beat the baseline by {gain:.3f} {metric} "
+                f"({basis_label(basis)}), above the "
                 f"{threshold} promotion threshold."
             )
         else:
             champion = BASELINE
             reason = (
-                f"Best challenger gain of {gain:.3f} {metric} is below the {threshold} threshold, "
+                f"Best challenger gain of {gain:.3f} {metric} ({basis_label(basis)}) is below the "
+                f"{threshold} threshold, "
                 "so the simpler baseline is kept."
             )
 
@@ -238,7 +295,13 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
             "features": features,
             "target": target,
             "threshold": 0.5,
-            "metrics": {"champion_auc": results[champion]["roc_auc"], "all_candidates": results},
+            "metrics": {
+                "champion_auc": results[champion]["roc_auc"],
+                "all_candidates": results,
+                "selection_basis": basis,
+                "selection_scores": selected,
+                "fold_scores": fold_scores,
+            },
             "data": {
                 "rows_total": int(len(df)),
                 "train_end": str(train_df[ts_col].max()),
