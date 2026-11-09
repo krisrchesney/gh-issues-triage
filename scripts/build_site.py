@@ -400,6 +400,7 @@ Data from the GitHub REST API (public repositories). Not affiliated with GitHub 
 </main>
 <div id="tip" role="tooltip"></div>
 <script>{CHART_JS}</script>
+<script data-goatcounter="https://krisrchesney.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body>
 </html>
 """
